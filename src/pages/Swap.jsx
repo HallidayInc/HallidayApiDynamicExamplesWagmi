@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useDynamicContext } from '@dynamic-labs/sdk-react-core'
-import { useAccount, useReadContract, useWriteContract, useSwitchChain } from 'wagmi'
+import { useAccount, useReadContract, useWriteContract, useSwitchChain, useSignTypedData } from 'wagmi'
 import { formatUnits, parseUnits } from 'viem'
 import { base } from 'wagmi/chains'
 
@@ -8,7 +8,7 @@ const HALLIDAY_API_KEY = import.meta.env.VITE_HALLIDAY_API_KEY
 const FROM_CHAIN_ID = base.id // Base mainnet
 const INPUT_TOKEN_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' // USDC on Base
 const INPUT_ASSET = 'base:' + INPUT_TOKEN_ADDRESS
-const OUTPUT_ASSET = 'story:0x'
+const OUTPUT_ASSET = 'megaeth:0x28b7e77f82b25b95953825f1e3ea0e36c1c29861'
 
 const ERC20_ABI = [
   {
@@ -42,6 +42,7 @@ function Swap() {
   const { address, isConnected } = useAccount()
   const { switchChainAsync } = useSwitchChain()
   const { writeContractAsync } = useWriteContract()
+  const { signTypedDataAsync } = useSignTypedData()
 
   // State for form inputs
   const [amount, setAmount] = useState('')
@@ -225,13 +226,59 @@ function Swap() {
     setIsLoading(true)
 
     try {
-      const acceptedSwap = await acceptQuote()
-      setSwapData(acceptedSwap)
+      let confirmResult = await acceptQuote()
+
+      // Handle user verification if required (>= $300 owner verify, >= $1M withdrawal sim)
+      // Loop to handle up to two verification round-trips
+      while (confirmResult.next_instruction?.type === 'USER_VERIFY') {
+        const { verification_token, verifications } = confirmResult.next_instruction
+
+        const signatures = await Promise.all(
+          verifications.map(async (v) => {
+            let signature
+            if (v.signature_type === 'EIP712') {
+              const typedData = JSON.parse(v.payload)
+              const { EIP712Domain, ...types } = typedData.types
+              signature = await signTypedDataAsync({
+                domain: typedData.domain,
+                types,
+                primaryType: typedData.primaryType || Object.keys(types)[0],
+                message: typedData.message,
+              })
+            }
+            return { reason: v.reason, signature_type: v.signature_type, signature }
+          })
+        )
+
+        const verifyRes = await fetch('https://v2.prod.halliday.xyz/payments/confirm', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + HALLIDAY_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ verification_token, signatures })
+        })
+
+        if (verifyRes.status === 409) {
+          break // Already confirmed — treat as success
+        } else if (verifyRes.status === 400) {
+          alert('Quote expired. Please try again.')
+          setIsLoading(false)
+          return
+        } else if (verifyRes.status === 401) {
+          console.warn('Signature verification failed, retrying...')
+          continue
+        }
+
+        confirmResult = await verifyRes.json()
+      }
+
+      setSwapData(confirmResult)
 
       // Start polling for status
       statusIntervalRef.current = setInterval(async () => {
         try {
-          const status = await getSwapStatus(acceptedSwap.payment_id)
+          const status = await getSwapStatus(confirmResult.payment_id)
           setSwapStatus(status)
         } catch (e) {
           console.error('Error fetching swap status', e)
@@ -239,15 +286,15 @@ function Swap() {
       }, 5000)
 
       // Get initial status
-      const initialStatus = await getSwapStatus(acceptedSwap.payment_id)
+      const initialStatus = await getSwapStatus(confirmResult.payment_id)
       setSwapStatus(initialStatus)
 
       setIsLoading(false)
       setScreen('swap')
 
       // Fund the swap using wagmi
-      const fundAmount = acceptedSwap.quoted.route[0].net_effect.consume[0].amount
-      const fundAddress = acceptedSwap.processing_addresses[0].address
+      const fundAmount = confirmResult.quoted.route[0].net_effect.consume[0].amount
+      const fundAddress = confirmResult.processing_addresses[0].address
       const decimals = decimalsData || 6
 
       // Switch to Base chain if needed
@@ -397,7 +444,7 @@ function Swap() {
             <div className="output-amount" id="receive-amount">{receiveAmount}</div>
             <div className="output-usd" id="receive-usd">{receiveUsd}</div>
             <div className="output-currency">
-              IP <img src="https://coin-images.coingecko.com/coins/images/54035/large/Transparent_bg.png?1738075331" alt="IP" className="token-icon" />
+              MEGA <img src="https://coin-images.coingecko.com/coins/images/69995/large/ICON.png?1760337992" alt="MEGA" className="token-icon" />
             </div>
           </div>
         </div>

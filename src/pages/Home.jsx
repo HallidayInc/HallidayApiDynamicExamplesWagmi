@@ -45,12 +45,12 @@ function Home() {
     {
       to: '/onramp',
       title: 'Onramp',
-      description: 'Convert fiat currency to IP tokens via Stripe, Transak, or Moonpay'
+      description: 'Convert fiat currency to MEGA tokens via Stripe, Transak, or Moonpay'
     },
     {
       to: '/swap',
       title: 'Swap',
-      description: 'Cross-chain swap from Base USDC to IP on Story mainnet'
+      description: 'Cross-chain swap from Base USDC to MEGA on MegaETH'
     },
     {
       to: '/retry',

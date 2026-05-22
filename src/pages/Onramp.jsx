@@ -1,16 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 import { useDynamicContext } from '@dynamic-labs/sdk-react-core'
-import { useAccount } from 'wagmi'
+import { useAccount, useSignTypedData } from 'wagmi'
 
 const HALLIDAY_API_KEY = import.meta.env.VITE_HALLIDAY_API_KEY
 const INPUT_ASSET = 'usd'
-const OUTPUT_ASSET = 'story:0x'
+const OUTPUT_ASSET = 'megaeth:0x28b7e77f82b25b95953825f1e3ea0e36c1c29861'
 const ONRAMPS = ['stripe', 'transak', 'moonpay']
 const FIAT_ONRAMP_PAY_IN_METHODS = ['CREDIT_CARD']
 
 function Onramp() {
   const { sdkHasLoaded, user, setShowAuthFlow, handleLogOut } = useDynamicContext()
   const { address, isConnected } = useAccount()
+  const { signTypedDataAsync } = useSignTypedData()
 
   // State for form inputs
   const [payAmount, setPayAmount] = useState('')
@@ -59,7 +60,7 @@ function Onramp() {
     const price = (+currentQuote.price).toFixed(2)
     const aggPrice = (+currentQuote.prices?.[OUTPUT_ASSET] || 0).toFixed(2)
     const fees = (+currentQuote.fees || 0).toFixed(3)
-    return `$${price} per token, Total fees $${fees}. IP price $${aggPrice}.`
+    return `$${price} per token, Total fees $${fees}. MEGA price $${aggPrice}.`
   })()
 
   // API calls
@@ -169,17 +170,68 @@ function Onramp() {
     if (!canContinue) return
 
     setIsLoading(true)
-    const acceptedQuote = await acceptQuote()
-    const paymentId = acceptedQuote.payment_id
-    paymentIdRef.current = paymentId
 
-    paymentStatusIntervalRef.current = setInterval(async () => {
-      console.log('payment status:', paymentId, await getPaymentStatus(paymentId))
-    }, 5000)
+    try {
+      let confirmResult = await acceptQuote()
+      const paymentId = confirmResult.payment_id
+      paymentIdRef.current = paymentId
 
-    setIsLoading(false)
-    setOnrampUrl(acceptedQuote.next_instruction.funding_page_url)
-    setScreen('onramp')
+      // Handle user verification if required (>= $300 owner verify, >= $1M withdrawal sim)
+      // Loop to handle up to two verification round-trips
+      while (confirmResult.next_instruction?.type === 'USER_VERIFY') {
+        const { verification_token, verifications } = confirmResult.next_instruction
+
+        const signatures = await Promise.all(
+          verifications.map(async (v) => {
+            let signature
+            if (v.signature_type === 'EIP712') {
+              const typedData = JSON.parse(v.payload)
+              const { EIP712Domain, ...types } = typedData.types
+              signature = await signTypedDataAsync({
+                domain: typedData.domain,
+                types,
+                primaryType: typedData.primaryType || Object.keys(types)[0],
+                message: typedData.message,
+              })
+            }
+            return { reason: v.reason, signature_type: v.signature_type, signature }
+          })
+        )
+
+        const verifyRes = await fetch('https://v2.prod.halliday.xyz/payments/confirm', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + HALLIDAY_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ verification_token, signatures })
+        })
+
+        if (verifyRes.status === 409) {
+          break // Already confirmed — treat as success
+        } else if (verifyRes.status === 400) {
+          alert('Quote expired. Please try again.')
+          setIsLoading(false)
+          return
+        } else if (verifyRes.status === 401) {
+          console.warn('Signature verification failed, retrying...')
+          continue
+        }
+
+        confirmResult = await verifyRes.json()
+      }
+
+      paymentStatusIntervalRef.current = setInterval(async () => {
+        console.log('payment status:', paymentId, await getPaymentStatus(paymentId))
+      }, 5000)
+
+      setIsLoading(false)
+      setOnrampUrl(confirmResult.next_instruction.funding_page_url)
+      setScreen('onramp')
+    } catch (e) {
+      console.error('Error confirming onramp', e)
+      setIsLoading(false)
+    }
   }
 
   function handleBack() {
@@ -263,7 +315,7 @@ function Onramp() {
   if (screen === 'input') {
     return (
       <div id="input-screen" className="container">
-        <h2 className="text-center">Onramp to IP</h2>
+        <h2 className="text-center">Onramp to MEGA</h2>
 
         <div className="radio-group">
           {ONRAMPS.map(onramp => (
@@ -306,14 +358,14 @@ function Onramp() {
             <div className="output-amount" id="receive-amount">{receiveAmount}</div>
             <div className="output-usd" id="receive-usd">{receiveUsd}</div>
             <div className="output-currency">
-              IP <img src="https://coin-images.coingecko.com/coins/images/54035/large/Transparent_bg.png?1738075331" alt="IP" className="token-icon" />
+              MEGA <img src="https://coin-images.coingecko.com/coins/images/69995/large/ICON.png?1760337992" alt="MEGA" className="token-icon" />
             </div>
           </div>
         </div>
 
         <div className="confirm-content">
           <div className="input-label">
-            Dynamic wallet address to onramp $IP to on Story. This wallet address will own the payment, <a href="https://docs.halliday.xyz/pages/otw" target="_blank" rel="noreferrer">learn more here</a>.
+            Dynamic wallet address to onramp $MEGA to on MegaETH. This wallet address will own the payment, <a href="https://docs.halliday.xyz/pages/otw" target="_blank" rel="noreferrer">learn more here</a>.
           </div>
 
           { loginSection }

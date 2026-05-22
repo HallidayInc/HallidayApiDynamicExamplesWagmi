@@ -325,7 +325,54 @@ function Retry() {
 
     try {
       // Accept the retry quote
-      const acceptQuoteRequest = await acceptQuote(option.newPaymentId, option.newStateToken)
+      let acceptQuoteRequest = await acceptQuote(option.newPaymentId, option.newStateToken)
+
+      // Handle user verification if required (>= $300 owner verify, >= $1M withdrawal sim)
+      // Loop to handle up to two verification round-trips
+      while (acceptQuoteRequest?.next_instruction?.type === 'USER_VERIFY') {
+        const { verification_token, verifications } = acceptQuoteRequest.next_instruction
+
+        const signatures = await Promise.all(
+          verifications.map(async (v) => {
+            let signature
+            if (v.signature_type === 'EIP712') {
+              const typedData = JSON.parse(v.payload)
+              const { EIP712Domain, ...types } = typedData.types
+              signature = await signTypedDataAsync({
+                domain: typedData.domain,
+                types,
+                primaryType: typedData.primaryType || Object.keys(types)[0],
+                message: typedData.message,
+              })
+            }
+            return { reason: v.reason, signature_type: v.signature_type, signature }
+          })
+        )
+
+        const verifyRes = await fetch('https://v2.prod.halliday.xyz/payments/confirm', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + HALLIDAY_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ verification_token, signatures })
+        })
+
+        if (verifyRes.status === 409) {
+          break // Already confirmed — treat as success
+        } else if (verifyRes.status === 400) {
+          alert('Quote expired. Please try again.')
+          setWithdrawalOptions(prev => prev.map((opt, i) =>
+            i === optionIndex ? { ...opt, isLoading: false } : opt
+          ))
+          return
+        } else if (verifyRes.status === 401) {
+          console.warn('Signature verification failed, retrying...')
+          continue
+        }
+
+        acceptQuoteRequest = await verifyRes.json()
+      }
 
       setWithdrawalOptions(prev => prev.map((opt, i) =>
         i === optionIndex ? { ...opt, status: acceptQuoteRequest.status + '...' } : opt
